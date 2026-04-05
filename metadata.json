@@ -1,0 +1,5 @@
+{
+  "name": "1001Labs - Immersive 3D Experience",
+  "description": "A high-end, immersive 3D website for 1001Labs featuring interactive Three.js backgrounds and GSAP scroll orchestrations.",
+  "requestFramePermissions": []
+}
