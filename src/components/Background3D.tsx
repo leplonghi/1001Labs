@@ -4,14 +4,80 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 
-// Simple Perlin-like noise function for organic movement
-const noise = (x: number, y: number, t: number) => {
-  return (
-    Math.sin(x * 0.2 + t * 0.5) * Math.cos(y * 0.2 + t * 0.3) * 0.5 +
-    Math.sin(x * 0.5 - t * 0.2) * Math.sin(y * 0.4 + t * 0.4) * 0.25 +
-    Math.cos(x * 0.1 + y * 0.1 + t * 0.1) * 0.8
-  );
-};
+const vertexShader = `
+  varying vec2 vUv;
+  varying float vDisplacement;
+  uniform float uTime;
+  uniform vec2 uMouse;
+  uniform float uScroll;
+
+  // GLSL Noise function
+  float hash(float n) { return fract(sin(n) * 43758.5453123); }
+  float noise(vec3 x) {
+    vec3 p = floor(x);
+    vec3 f = fract(x);
+    f = f*f*(3.0-2.0*f);
+    float n = p.x + p.y*57.0 + 113.0*p.z;
+    return mix(mix(mix( hash(n+  0.0), hash(n+  1.0),f.x),
+                   mix( hash(n+ 57.0), hash(n+ 58.0),f.x),f.y),
+               mix(mix( hash(n+113.0), hash(n+114.0),f.x),
+                   mix( hash(n+170.0), hash(n+171.0),f.x),f.y),f.z);
+  }
+
+  void main() {
+    vUv = uv;
+    
+    vec3 pos = position;
+    float distFromCenter = length(pos.xy);
+    float centerCleanFactor = smoothstep(2.0, 60.0, distFromCenter);
+    
+    // Scroll tilt effect
+    float scrollTilt = uScroll * 15.0;
+    pos.z += sin(pos.y * 0.05 + uScroll * 5.0) * 10.0;
+
+    float distFromMouse = length(pos.xy - uMouse * 80.0);
+    float mousePush = exp(-distFromMouse * 0.12) * 12.0;
+
+    float n1 = noise(vec3(pos.xy * 0.03, uTime * 0.5)) * 16.0;
+    float n2 = noise(vec3(pos.xy * 0.08, uTime * 0.8)) * 8.0;
+    float liquid = sin(pos.x * 0.05 + uTime * 1.2) * cos(pos.y * 0.05 + uTime * 1.2) * 6.0;
+    float secondary = sin(pos.x * 0.1 - uTime * 0.4) * 2.0;
+    float displacement = (n1 + n2 + liquid + secondary) * centerCleanFactor + mousePush;
+    
+    vDisplacement = displacement;
+    pos.z += displacement;
+    
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+  }
+`;
+
+const fragmentShader = `
+  varying vec2 vUv;
+  varying float vDisplacement;
+  uniform vec3 uColorCyan;
+  uniform vec3 uColorMagenta;
+  uniform vec3 uColorIndigo;
+  
+  void main() {
+    float height = vDisplacement / 12.0;
+    vec3 color = vec3(0.0005); // Even darker base
+    
+    if (height > 0.01) {
+      float mixFactor = smoothstep(0.01, 1.2, height);
+      // More subtle, deeper colors
+      vec3 accent = mix(uColorMagenta * 0.3, uColorCyan * 0.3, vUv.x);
+      color = mix(color, accent, mixFactor * 0.4);
+    }
+    
+    // Smooth edge fade - very tight
+    float edgeFade = smoothstep(0.5, 0.05, abs(vUv.x - 0.5)) * smoothstep(0.5, 0.05, abs(vUv.y - 0.5));
+    
+    float dist = length(vUv - 0.5);
+    color = mix(color, uColorIndigo * 0.05, smoothstep(0.0, 1.0, dist));
+    
+    gl_FragColor = vec4(color, edgeFade * 0.8);
+  }
+`;
 
 export default function Background3D() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -23,169 +89,154 @@ export default function Background3D() {
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x000000);
-    scene.fog = new THREE.FogExp2(0x000000, 0.05);
+    scene.fog = new THREE.FogExp2(0x000000, 0.04);
 
-    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 2000);
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
     
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     containerRef.current.appendChild(renderer.domElement);
 
-    // 1. Premium Topographic Mesh
-    const planeSize = 80;
-    const segments = 120;
-    const geometry = new THREE.PlaneGeometry(planeSize, planeSize, segments, segments);
-    
-    const material = new THREE.MeshStandardMaterial({
-      color: 0x000000,
+    // 1. Shader-based Topographic Mesh (Huge to hide edges)
+    const geometry = new THREE.PlaneGeometry(600, 600, 250, 250);
+    const shaderMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uTime: { value: 0 },
+        uMouse: { value: new THREE.Vector2(0, 0) },
+        uScroll: { value: 0 },
+        uColorCyan: { value: new THREE.Color(0x00ffff) },
+        uColorMagenta: { value: new THREE.Color(0xff00ff) },
+        uColorIndigo: { value: new THREE.Color(0x4b0082) }
+      },
+      vertexShader,
+      fragmentShader,
       wireframe: true,
       transparent: true,
-      opacity: 0.4,
-      metalness: 0.9,
-      roughness: 0.1,
-      emissive: 0x000000,
-      vertexColors: true,
       side: THREE.DoubleSide,
+      depthWrite: false, // Better for overlapping transparent objects
+      blending: THREE.AdditiveBlending
     });
 
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.rotation.x = -Math.PI / 2.2;
-    mesh.position.y = -2;
+    const mesh = new THREE.Mesh(geometry, shaderMaterial);
+    mesh.rotation.x = -Math.PI / 2.5;
+    mesh.position.y = -10;
     scene.add(mesh);
 
-    // 2. Sophisticated Lighting System
-    const ambientLight = new THREE.AmbientLight(0x000000, 0);
+    // Mirrored top mesh for "infinite digital valley" immersion
+    const topMesh = mesh.clone();
+    topMesh.rotation.x = Math.PI / 2.5;
+    topMesh.position.y = 20;
+    scene.add(topMesh);
+
+    // 2. High-Density Galactic Particle System
+    const particlesCount = 8000;
+    const particlesGeometry = new THREE.BufferGeometry();
+    const posArray = new Float32Array(particlesCount * 3);
+    for(let i = 0; i < particlesCount * 3; i++) {
+      posArray[i] = (Math.random() - 0.5) * 600; // Much wider field
+    }
+    particlesGeometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+    const particlesMaterial = new THREE.PointsMaterial({
+      size: 0.03,
+      color: 0x4f46e5,
+      transparent: true,
+      opacity: 0.15,
+      blending: THREE.AdditiveBlending
+    });
+    const particlesMesh = new THREE.Points(particlesGeometry, particlesMaterial);
+    scene.add(particlesMesh);
+
+    // 3. Dynamic Ambient Environment
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.1);
     scene.add(ambientLight);
 
-    // Dynamic accent lights
-    const light1 = new THREE.PointLight(0x00ffff, 15, 40); // Cyan
-    const light2 = new THREE.PointLight(0x0066ff, 12, 50); // Electric Blue
-    const light3 = new THREE.PointLight(0x4b0082, 10, 40); // Subtle Violet
-    
-    scene.add(light1, light2, light3);
+    const lights: THREE.PointLight[] = [
+      new THREE.PointLight(0x00ffff, 8, 80),
+      new THREE.PointLight(0xff00ff, 8, 80),
+      new THREE.PointLight(0x4b0082, 5, 100)
+    ];
+    lights.forEach(l => scene.add(l));
 
-    // 3. Post-Processing for Atmosphere
+    // 4. Cinema Post-Processing
     const composer = new EffectComposer(renderer);
-    const renderPass = new RenderPass(scene, camera);
-    composer.addPass(renderPass);
-
-    const bloomPass = new UnrealBloomPass(
+    composer.addPass(new RenderPass(scene, camera));
+    composer.addPass(new UnrealBloomPass(
       new THREE.Vector2(window.innerWidth, window.innerHeight),
-      0.8, // subtle strength
-      0.5, // radius
-      0.9  // high threshold to only catch peaks
-    );
-    composer.addPass(bloomPass);
+      0.5, // Even lower intensity
+      0.4, 
+      0.9 
+    ));
 
-    camera.position.set(0, 4, 12);
-    camera.lookAt(0, 0, 0);
-
-    // Vertex attribute references
-    const positions = geometry.attributes.position;
-    const colors = new Float32Array(positions.count * 3);
-    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-
-    const handleMouseMove = (event: MouseEvent) => {
-      mouseRef.current.x = (event.clientX / window.innerWidth) * 2 - 1;
-      mouseRef.current.y = -(event.clientY / window.innerHeight) * 2 + 1;
+    const handleMouseMove = (e: MouseEvent) => {
+      mouseRef.current.x = (e.clientX / window.innerWidth) * 2 - 1;
+      mouseRef.current.y = -(e.clientY / window.innerHeight) * 2 + 1;
     };
-
     const handleScroll = () => {
       scrollRef.current = window.scrollY / (document.documentElement.scrollHeight - window.innerHeight);
     };
-
     const handleResize = () => {
-      camera.aspect = window.innerWidth / window.innerHeight;
+      if (!containerRef.current) return;
+      const width = containerRef.current.clientWidth;
+      const height = containerRef.current.clientHeight;
+      
+      camera.aspect = width / height;
       camera.updateProjectionMatrix();
-      renderer.setSize(window.innerWidth, window.innerHeight);
-      composer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setSize(width, height);
+      composer.setSize(width, height);
     };
+
+    const resizeObserver = new ResizeObserver(handleResize);
+    resizeObserver.observe(containerRef.current);
 
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('scroll', handleScroll);
     window.addEventListener('resize', handleResize);
 
-    const colorCyan = new THREE.Color(0x00ffff);
-    const colorBlue = new THREE.Color(0x0044ff);
-    const colorViolet = new THREE.Color(0x220044);
-    const colorBlack = new THREE.Color(0x000000);
+    camera.position.set(0, 8, 20);
+    camera.lookAt(0, 0, 0);
+
+    const clock = new THREE.Clock();
 
     let frame = 0;
     const animate = () => {
       frame = requestAnimationFrame(animate);
-      const time = Date.now() * 0.0004; // Slow, hypnotic speed
+      const time = clock.getElapsedTime(); 
+      const slowTime = time * 0.5;
       
-      // Update Lights
-      light1.position.set(
-        Math.sin(time * 0.7) * 20,
-        5 + Math.cos(time * 0.5) * 2,
-        Math.cos(time * 0.7) * 10
+      shaderMaterial.uniforms.uTime.value = time;
+      shaderMaterial.uniforms.uScroll.value = scrollRef.current;
+      shaderMaterial.uniforms.uMouse.value.lerp(new THREE.Vector2(mouseRef.current.x, mouseRef.current.y), 0.05);
+
+      const mX = mouseRef.current.x * 25;
+      const mY = mouseRef.current.y * 25;
+
+      // Pulse lights with rhythmic movement
+      lights[0].position.set(Math.sin(slowTime) * 40 + mX, 10 + Math.cos(time) * 5, Math.cos(slowTime) * 40);
+      lights[1].position.set(Math.cos(slowTime * 0.8) * 50, 15 + mY, Math.sin(slowTime * 0.8) * 50 - mX);
+      lights[2].position.set(mX * 0.5, 5, Math.sin(slowTime * 0.5) * 60);
+
+      mesh.rotation.y = THREE.MathUtils.lerp(mesh.rotation.y, mouseRef.current.x * 0.15 + Math.sin(slowTime * 0.15) * 0.03, 0.02);
+      mesh.rotation.z = Math.cos(slowTime * 0.08) * 0.015;
+      topMesh.rotation.y = mesh.rotation.y;
+      topMesh.rotation.z = -mesh.rotation.z;
+
+      particlesMesh.rotation.y = time * 0.01 + mouseRef.current.x * 0.1;
+      particlesMesh.rotation.z = scrollRef.current * 0.2 + Math.sin(slowTime * 0.05) * 0.05;
+
+      // Silky smooth camera with higher inertia
+      const targetCamX = mouseRef.current.x * 10 + Math.sin(slowTime * 0.25) * 1.5;
+      const targetCamY = 12 + scrollRef.current * 15 + Math.cos(slowTime * 0.35) * 1.2;
+      
+      camera.position.x = THREE.MathUtils.lerp(camera.position.x, targetCamX, 0.02);
+      camera.position.y = THREE.MathUtils.lerp(camera.position.y, targetCamY, 0.02);
+      
+      const targetAim = new THREE.Vector3(
+        mouseRef.current.x * 6 + Math.sin(slowTime * 0.15) * 2, 
+        -8 + scrollRef.current * 10 + Math.cos(slowTime * 0.25) * 1.5, 
+        0
       );
-      light2.position.set(
-        Math.cos(time * 0.4) * 25,
-        4 + Math.sin(time * 0.6) * 3,
-        Math.sin(time * 0.4) * 15
-      );
-      light3.position.set(
-        Math.sin(time * 0.3) * 15,
-        3,
-        Math.cos(time * 0.3) * 20
-      );
-
-      // Update Mesh Geometry & Colors
-      const posArray = positions.array as Float32Array;
-      const colorArray = geometry.attributes.color.array as Float32Array;
-
-      for (let i = 0; i < posArray.length; i += 3) {
-        const x = posArray[i];
-        const y = posArray[i + 1];
-        
-        // Radial falloff to keep center clean for text
-        const distFromCenter = Math.sqrt(x * x + y * y);
-        const centerCleanFactor = THREE.MathUtils.smoothstep(distFromCenter, 5, 25);
-        
-        // Mouse influence (subtle push)
-        const mouseX = mouseRef.current.x * 30;
-        const mouseY = mouseRef.current.y * 30;
-        const distFromMouse = Math.sqrt(Math.pow(x - mouseX, 2) + Math.pow(y - mouseY, 2));
-        const mousePush = Math.exp(-distFromMouse * 0.15) * 0.5;
-
-        // Topographic displacement
-        const n = noise(x * 0.15, y * 0.15, time) * 2.5;
-        const displacement = n * centerCleanFactor + mousePush;
-        
-        posArray[i + 2] = displacement;
-
-        // Sophisticated Color Mapping
-        const colorIdx = i;
-        const height = displacement / 2.5;
-        
-        // Base color is black, adding accents based on height and position
-        let finalColor = colorBlack.clone();
-        
-        if (height > 0.2) {
-          const mixFactor = (height - 0.2) * centerCleanFactor;
-          const accentColor = x > 0 ? colorCyan : colorBlue;
-          finalColor.lerp(accentColor, mixFactor * 0.4);
-        }
-        
-        if (distFromCenter > 20) {
-          finalColor.lerp(colorViolet, (distFromCenter - 20) * 0.01);
-        }
-
-        colorArray[colorIdx] = finalColor.r;
-        colorArray[colorIdx + 1] = finalColor.g;
-        colorArray[colorIdx + 2] = finalColor.b;
-      }
-
-      positions.needsUpdate = true;
-      geometry.attributes.color.needsUpdate = true;
-
-      // Smooth camera sway
-      camera.position.x = THREE.MathUtils.lerp(camera.position.x, mouseRef.current.x * 2, 0.02);
-      camera.position.y = THREE.MathUtils.lerp(camera.position.y, 4 + scrollRef.current * 3, 0.02);
-      camera.lookAt(0, 0, 0);
+      camera.lookAt(targetAim);
 
       composer.render();
     };
@@ -194,22 +245,17 @@ export default function Background3D() {
 
     return () => {
       cancelAnimationFrame(frame);
+      resizeObserver.disconnect();
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('scroll', handleScroll);
       window.removeEventListener('resize', handleResize);
       renderer.dispose();
-      if (containerRef.current) {
-        containerRef.current.removeChild(renderer.domElement);
-      }
+      shaderMaterial.dispose();
+      geometry.dispose();
+      if (containerRef.current) containerRef.current.removeChild(renderer.domElement);
     };
   }, []);
 
-  return (
-    <div 
-      ref={containerRef} 
-      className="fixed inset-0 -z-10 bg-black pointer-events-none"
-      id="bg-3d-canvas"
-    />
-  );
+  return <div ref={containerRef} className="fixed inset-0 -z-10 bg-black pointer-events-none" />;
 }
 
